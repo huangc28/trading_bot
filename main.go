@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 
 	"github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/futures"
@@ -22,6 +24,9 @@ func main() {
 	ctx := context.Background()
 	futureClient := futures.NewClient(APIKey, APISecret)
 
+	wscArr := []chan struct{}{}
+	wscChan := make(chan chan struct{})
+
 	if _, err := futureClient.
 		NewChangeLeverageService().
 		Leverage(2).
@@ -30,21 +35,48 @@ func main() {
 		log.Fatalf("failed to change initial leverage %v", err)
 	}
 
-	doneC, _, err := binance.WsAggTradeServe(
-		"BTCUSDT",
-		func(event *binance.WsAggTradeEvent) {
-			wsAggTradeHandler(event, futureClient)
-		},
+	go func(futureClient *futures.Client) {
+		doneC, _, err := binance.WsAggTradeServe(
+			"BTCUSDT",
+			func(event *binance.WsAggTradeEvent) {
+				wsAggTradeHandler(event, futureClient)
+			},
 
-		func(err error) {
-			wsAggTradeErrHandler(err)
-		},
+			func(err error) {
+				wsAggTradeErrHandler(err)
+			},
+		)
+
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		wscChan <- doneC
+
+		<-doneC
+	}(
+		futureClient,
 	)
 
-	if err != nil {
-		fmt.Println(err)
-		return
+	log.Printf("debug 1")
+
+	for wsContext := range wscChan {
+		wscArr = append(wscArr, wsContext)
 	}
 
-	<-doneC
+	log.Printf("debug 2 %v", wscArr)
+
+	c := make(chan os.Signal, 1)
+
+	// We'll accept graceful shutdowns when quit via SIGINT (Ctrl+C)
+	// SIGKILL, SIGQUIT or SIGTERM (Ctrl+/) will not be caught.
+	signal.Notify(c, os.Interrupt)
+
+	// Block until we receive interrupt signal
+	<-c
+
+	for _, wsc := range wscArr {
+		close(wsc)
+	}
 }
