@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 
-	"github.com/adshao/go-binance/v2/futures"
+	"github.com/huangc28/go-binance/v2"
+	"github.com/huangc28/go-binance/v2/futures"
 	"github.com/looplab/fsm"
 )
 
@@ -17,7 +17,9 @@ type StrategyState struct {
 	LongOrder *futures.CreateOrderResponse
 
 	// The long position of the current strategy deployment.
-	// LongPosition
+	LongPositionInfo *LongPositionInfo
+
+	// ShortOrder
 }
 
 var (
@@ -110,8 +112,6 @@ func GetStrategyState() *StrategyState {
 			},
 			fsm.Callbacks{
 				fmt.Sprintf("enter_%s", WaitingToEnterLong): func(ctx context.Context, evt *fsm.Event) {
-					log.Printf("debug enter %v", WaitingToEnterLong)
-					log.Printf("debug enter 2 %v", evt.Args)
 					if len(evt.Args) > 0 {
 						longOrder := evt.Args[0].(*futures.CreateOrderResponse)
 						_strategyState.LongOrder = longOrder
@@ -119,6 +119,25 @@ func GetStrategyState() *StrategyState {
 						// WTF... handle this error
 					}
 				},
+
+				fmt.Sprintf("enter_%s", Longing): func(ctx context.Context, evt *fsm.Event) {
+					if len(evt.Args) > 3 {
+						longPos := evt.Args[0].(*binance.WsOrderTradeUpdate)
+						longTpOrder := evt.Args[1].(*futures.CreateOrderResponse)
+						longSlOrder := evt.Args[2].(*futures.CreateOrderResponse)
+
+						_strategyState.LongPositionInfo = &LongPositionInfo{
+							LongPosition:    longPos,
+							TakeProfitOrder: longTpOrder,
+							StopLossOrder:   longSlOrder,
+						}
+
+					} else {
+						// WTF... handle this error
+					}
+				},
+
+				fmt.Sprintf("enter_%s", Done): func(ctx context.Context, evt *fsm.Event) {},
 			},
 		)
 	})

@@ -2,29 +2,45 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"os"
 	"os/signal"
 
-	"github.com/adshao/go-binance/v2"
-	"github.com/adshao/go-binance/v2/futures"
+	log "github.com/sirupsen/logrus"
+
+	"github.com/huangc28/go-binance/v2"
+	"github.com/huangc28/go-binance/v2/futures"
 )
 
 var (
 	// APIKey    = "Os9hSbx9BLZmfoCPQcpM8ABGXV5r1DqS946JfleEx73xr8VCULkEo8aE7rKAlerp"
 	// APISecret = "y7OXWWRb7da0vClEthHUUowbsDH6gJJtVc0tQvLATm9ii6o3NRbpfpqw4W37oyPo"
 
+	// Long order account
 	APIKey    = "14c8d9ffa86eb2d8148c1671297be01497363b6116f9a15c93e0eb378c43a2c2"
 	APISecret = "522643237acaee837a8b7d1c9c2435cc0648ffc29bf00a89c9ddcd5fb37122ee"
+
+	// Short order account
+	ShortAPIKey   = "d6805cc1c9039f08a24053165b8585c8498117d473fdb901da51bdf52c7ecc9e"
+	LongAPISecret = "164d174af6d9b4c95e94a38e95e48fda32913f0373c5612d78ab3985bd8bed43"
 )
 
-func main() {
+func init() {
+	// valid testnet websocket
+	binance.SetBaseWsTestnetURL("wss://stream.binancefuture.com/ws")
+	binance.UseTestnet = true
 	futures.UseTestnet = true
+}
+
+func main() {
 	ctx := context.Background()
 	futureClient := futures.NewClient(APIKey, APISecret)
 
-	wscArr := []chan struct{}{}
+	shortClient := futures.NewClient(
+		ShortAPIKey,
+		LongAPISecret,
+	)
+
+	wscArr := make([]chan struct{}, 0, 2)
 	wscChan := make(chan chan struct{})
 
 	if _, err := futureClient.
@@ -35,6 +51,7 @@ func main() {
 		log.Fatalf("failed to change initial leverage %v", err)
 	}
 
+	// Listen to price tick to create order.
 	go func(futureClient *futures.Client) {
 		doneC, _, err := binance.WsAggTradeServe(
 			"BTCUSDT",
@@ -48,7 +65,55 @@ func main() {
 		)
 
 		if err != nil {
-			fmt.Println(err)
+			log.Errorf("failed to listen to price tick %v", err)
+			return
+		}
+
+		wscChan <- doneC
+
+		<-doneC
+	}(futureClient)
+
+	// Listen to profile info to know if order has been executed.
+	go func(futureClient *futures.Client, shortClient *futures.Client) {
+		ctx := context.Background()
+
+		// Create user data listenKey
+		listenKey, err := futureClient.
+			NewStartUserStreamService().
+			Do(ctx)
+
+		if err != nil {
+			log.Errorf("failed to create listen key %v", err)
+			return
+		}
+
+		log.Infof("listenKey: %v", listenKey)
+
+		// Keep listenKey alive
+		if err := futureClient.
+			NewKeepaliveUserStreamService().
+			ListenKey(listenKey).
+			Do(ctx); err != nil {
+			log.Errorf("failed to keepalive listen key %v", err)
+			return
+		}
+
+		log.Infof("keepalive listenKey: %v", listenKey)
+
+		doneC, _, err := binance.WsUserDataServe(
+			listenKey,
+			func(event *binance.WsUserDataEvent) {
+				wsUserDataHandler(event, futureClient, shortClient)
+			},
+
+			func(err error) {
+				wsUserDataErrorHandler(err, futureClient)
+			},
+		)
+
+		if err != nil {
+			log.Errorf("failed to listen to user data", err)
 			return
 		}
 
@@ -57,15 +122,19 @@ func main() {
 		<-doneC
 	}(
 		futureClient,
+		shortClient,
 	)
 
-	log.Printf("debug 1")
+	for wsc := range wscChan {
+		wscArr = append(wscArr, wsc)
 
-	for wsContext := range wscChan {
-		wscArr = append(wscArr, wsContext)
+		if len(wscArr) == cap(wscArr) {
+			close(wscChan)
+			break
+		}
 	}
 
-	log.Printf("debug 2 %v", wscArr)
+	log.Infof("ws context %v", len(wscArr))
 
 	c := make(chan os.Signal, 1)
 
